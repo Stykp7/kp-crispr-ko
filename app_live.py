@@ -100,7 +100,7 @@ with col_logo:
     st.image(LOGO_URL, width=70)  # Adjust width if needed
 
 with col_title:
-    st.title("CRISPR gRNA Design Assistant (hg38)")
+    st.title("CRISPR KO gRNA Design Assistant (hg38)")
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
