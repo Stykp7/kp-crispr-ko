@@ -357,7 +357,7 @@ if run_btn:
             st.subheader("Top 2 gRNAs")
             st.dataframe(top2, use_container_width=True)
 
-            st.subheader("Oligos to Order (Masaki Rules)")
+            st.subheader("Oligos to Order")
             st.dataframe(df_oligos, use_container_width=True)
 
             oligo_text=[]
