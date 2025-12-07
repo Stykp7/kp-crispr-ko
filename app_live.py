@@ -23,13 +23,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# Soft dual-mode theme
+# Soft dual-mode theme (CSS only – does not touch Python logic)
 st.markdown(
     """
     <style>
     body, .main, .stTextInput, .stSelectbox, .stButton, .stMarkdown {
         font-family: "Helvetica Neue", Arial, sans-serif !important;
     }
+    /* Light mode */
     @media (prefers-color-scheme: light) {
       :root {
         --bg: #ffffff;
@@ -38,6 +39,7 @@ st.markdown(
         --accent-soft: #dbeeff;
       }
     }
+    /* Dark mode */
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #0f1116;
@@ -46,9 +48,18 @@ st.markdown(
         --accent-soft: #113a4c;
       }
     }
-    body, .main { background-color: var(--bg) !important; color: var(--fg) !important; }
-    h1, h2, h3 { color: var(--accent) !important; }
-    .uol-divider { border: none; border-top: 1px solid rgba(75,184,240,0.3); margin: 0.75rem 0 1.5rem 0; }
+    body, .main {
+        background-color: var(--bg) !important;
+        color: var(--fg) !important;
+    }
+    h1, h2, h3 {
+        color: var(--accent) !important;
+    }
+    .uol-divider {
+        border: none;
+        border-top: 1px solid rgba(75, 184, 240, 0.3);
+        margin: 0.75rem 0 1.5rem 0;
+    }
     input[type="text"], textarea {
         background-color: var(--accent-soft) !important;
         color: var(--fg) !important;
@@ -57,31 +68,31 @@ st.markdown(
     }
     .stButton>button {
         background-color: var(--accent) !important;
-        color: white !important;
-        border-radius: 6px !important;
-        border: none !important;
-        padding: 0.4rem 1.2rem !important;
     }
-    .footer-text { font-size: 0.8rem; color: var(--fg); margin-top: 2rem; text-align: center; }
+    .footer-text {
+        font-size: 0.8rem;
+        color: var(--fg);
+        margin-top: 2rem;
+        text-align: center;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ========================
-# Logo Banner
-# ========================
-st.markdown(
-    """
-    <div style='text-align: center; margin-bottom: 20px;'>
-        <img src='https://raw.githubusercontent.com/stykp7/kp-crispr-ko/main/assets/logo.png'
-             style='width: 180px; max-width: 40%; border-radius: 12px;'>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+# ============================================================
+# Top Banner: Logo (left) + Title (right)
+# ============================================================
 
-st.title("CRISPR gRNA Design Assistant (hg38)")
+LOGO_URL = "https://raw.githubusercontent.com/Stykp7/kp-crispr-ko/main/assets/Logo.png"
+
+col_logo, col_title = st.columns([1, 8])
+
+with col_logo:
+    st.image(LOGO_URL, width=70)  # Adjust width if needed
+
+with col_title:
+    st.title("CRISPR gRNA Design Assistant (hg38)")
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
