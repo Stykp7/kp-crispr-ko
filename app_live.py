@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # CRISPR gRNA Design Assistant (hg38)
-# Ensembl exon → Local scoring engine → Top2 oligos (Streamlit-Cloud friendly)
+# Ensembl exon → Local scoring engine → QC dashboard → Oligos → Downloads
 
 import time
 from pathlib import Path
@@ -9,6 +9,13 @@ import re
 import pandas as pd
 import requests
 import streamlit as st
+
+# Try Altair for QC plots, but don't break app if missing
+try:
+    import altair as alt
+    HAS_ALTAIR = True
+except ImportError:
+    HAS_ALTAIR = False
 
 # ============================================================
 # Basic configuration & styling
@@ -68,6 +75,7 @@ st.markdown(
     }
     .stButton>button {
         background-color: var(--accent) !important;
+        color: white !important;
     }
     .footer-text {
         font-size: 0.8rem;
@@ -137,14 +145,14 @@ def find_spcas9_ngg_guides(seq):
     for i in range(len(seq) - 23 + 1):
         twenty = seq[i:i+20]
         pam = seq[i+20:i+23]
-        if len(pam)==3 and pam[1:]=="GG":  # NGG
+        if len(pam) == 3 and pam[1:] == "GG":  # NGG
             guides.append({
-                "SeqId": twenty+pam,
+                "SeqId": twenty + pam,
                 "guideId": f"fw_{i+1}",
                 "targetSeq": twenty,
                 "PAM": pam,
                 "strand": "+",
-                "GuidePos": i+1
+                "GuidePos": i + 1
             })
 
     # Reverse strand
@@ -153,10 +161,10 @@ def find_spcas9_ngg_guides(seq):
     for i in range(len(rc) - 23 + 1):
         twenty = rc[i:i+20]
         pam = rc[i+20:i+23]
-        if len(pam)==3 and pam[1:]=="GG":
+        if len(pam) == 3 and pam[1:] == "GG":
             start_original = L - (i + 23) + 1
             guides.append({
-                "SeqId": twenty+pam,
+                "SeqId": twenty + pam,
                 "guideId": f"rv_{start_original}",
                 "targetSeq": twenty,
                 "PAM": pam,
@@ -167,106 +175,139 @@ def find_spcas9_ngg_guides(seq):
 
 def gc_fraction(seq):
     seq = clean_sequence(seq)
-    if not seq: return 0
-    return (seq.count("G")+seq.count("C"))/len(seq)
+    if not seq:
+        return 0
+    return (seq.count("G") + seq.count("C")) / len(seq)
 
 def local_offtargets_within_seq(seq, guide, max_mismatches=3):
     seq = clean_sequence(seq)
     guide = clean_sequence(guide)
     L = len(guide)
 
-    def mismatches(a,b):
-        return sum(x!=y for x,y in zip(a,b))
+    def mismatches(a, b):
+        return sum(x != y for x, y in zip(a, b))
 
     count = 0
 
     # forward
-    for i in range(len(seq)-L+1):
+    for i in range(len(seq) - L + 1):
         w = seq[i:i+L]
-        if w != guide and mismatches(w, guide)<=max_mismatches:
-            count+=1
+        if w != guide and mismatches(w, guide) <= max_mismatches:
+            count += 1
 
     # reverse
     rc = revcomp(seq)
-    for i in range(len(rc)-L+1):
+    for i in range(len(rc) - L + 1):
         w = rc[i:i+L]
-        if w != guide and mismatches(w, guide)<=max_mismatches:
-            count+=1
+        if w != guide and mismatches(w, guide) <= max_mismatches:
+            count += 1
 
     return count
 
 def mit_like_score(guide):
     g = clean_sequence(guide)
-    if len(g)!=20: return 0
+    if len(g) != 20:
+        return 0
     gc = gc_fraction(g)
-    score = max(0,1-abs(gc-0.5)/0.5)*100
-    if "TTTT" in g: score*=0.7
-    if gc<0.3 or gc>0.7: score*=0.8
+    score = max(0, 1 - abs(gc - 0.5) / 0.5) * 100
+    if "TTTT" in g:
+        score *= 0.7
+    if gc < 0.3 or gc > 0.7:
+        score *= 0.8
     return score
 
 def efficiency_like_score(g):
     g = clean_sequence(g)
-    if len(g)!=20: return 0
+    if len(g) != 20:
+        return 0
     score = 50
-    if g[19]=="G": score+=10
-    if g[0]=="A": score-=5
+    if g[19] == "G":
+        score += 10
+    if g[0] == "A":
+        score -= 5
     gc = gc_fraction(g)
-    score += max(0,1-abs(gc-0.5)/0.5)*20
-    return max(0,min(100,score))
+    score += max(0, 1 - abs(gc - 0.5) / 0.5) * 20
+    return max(0, min(100, score))
 
 def rank_guides_local(seq, guides):
+    """
+    Returns:
+        display_ranked : ranked table with cosmetic columns removed
+        top10          : top 10 guides (display)
+        top2           : top 2 guides (display)
+        df_oligos      : oligo design table
+        ranked_full    : full internal table (for QC + downloads)
+    """
     if not guides:
-        return None,None,None,None
+        return None, None, None, None, None
 
     df = pd.DataFrame(guides)
 
     df["GC_frac"] = df["targetSeq"].apply(gc_fraction)
-    df["GC_bonus"] = df["GC_frac"].apply(lambda gc: 1 if 0.4<=gc<=0.6 else max(0,1-abs(gc-0.5)/0.5))
+    df["GC_bonus"] = df["GC_frac"].apply(
+        lambda gc: 1 if 0.4 <= gc <= 0.6 else max(0, 1 - abs(gc - 0.5) / 0.5)
+    )
     df["MIT"] = df["targetSeq"].apply(mit_like_score)
     df["EffScore"] = df["targetSeq"].apply(efficiency_like_score)
-    df["OffTargets"] = df["targetSeq"].apply(lambda g: local_offtargets_within_seq(seq,g))
+    df["OffTargets"] = df["targetSeq"].apply(lambda g: local_offtargets_within_seq(seq, g))
+
     max_pos = df["GuidePos"].max() or 1
-    df["Position_bonus"] = 1 - df["GuidePos"]/max_pos
-    df["MIT_norm"] = df["MIT"]/max(df["MIT"].max(),1)
-    df["Off_norm"] = df["OffTargets"]/max(df["OffTargets"].max(),1)
+    df["Position_bonus"] = 1 - df["GuidePos"] / max_pos
+
+    df["MIT_norm"] = df["MIT"] / max(df["MIT"].max(), 1)
+    df["Off_norm"] = df["OffTargets"] / max(df["OffTargets"].max(), 1)
 
     df["CombinedScore"] = (
-        0.5*df["MIT_norm"]
-        -0.3*df["Off_norm"]
-        +0.1*df["GC_bonus"]
-        +0.1*df["Position_bonus"]
+        0.5 * df["MIT_norm"]
+        - 0.3 * df["Off_norm"]
+        + 0.1 * df["GC_bonus"]
+        + 0.1 * df["Position_bonus"]
     )
 
-    ranked = df.sort_values("CombinedScore", ascending=False).reset_index(drop=True)
+    ranked_full = df.sort_values("CombinedScore", ascending=False).reset_index(drop=True)
 
     # DROP unwanted columns ONLY in displayed tables
-    drop_cols = ["GC_frac","GC_bonus","MIT_norm","OffTargets","Off_norm"]
-    display_ranked = ranked.drop(columns=[c for c in drop_cols if c in ranked])
+    drop_cols = ["GC_frac", "GC_bonus", "MIT_norm", "OffTargets", "Off_norm"]
+    display_ranked = ranked_full.drop(columns=[c for c in drop_cols if c in ranked_full])
 
     top10 = display_ranked.head(10).reset_index(drop=True)
     top2 = display_ranked.head(2).reset_index(drop=True)
 
-    # Oligos
-    oligos=[]
-    for _,row in ranked.head(2).iterrows():  # must use full ranked
+    # Oligos (based on full ranked table)
+    oligos = []
+    for _, row in ranked_full.head(2).iterrows():
         guide = row["targetSeq"]
-        u6 = guide if guide.startswith("G") else "G"+guide
+        u6 = guide if guide.startswith("G") else "G" + guide
         oligos.append({
             "gRNA": row["guideId"],
             "GuideSeq": guide,
-            "Forward_5to3": "CACC"+u6,
-            "Reverse_3to5": "AAAC"+revcomp(u6)
+            "Forward_5to3": "CACC" + u6,
+            "Reverse_3to5": "AAAC" + revcomp(u6)
         })
     df_oligos = pd.DataFrame(oligos)
 
-    return display_ranked, top10, top2, df_oligos
+    return display_ranked, top10, top2, df_oligos, ranked_full
 
 # ============================================================
 # Session defaults
 # ============================================================
 
-if "exon_seq" not in st.session_state: st.session_state["exon_seq"]=""
-if "gene_label" not in st.session_state: st.session_state["gene_label"]=""
+if "exon_seq" not in st.session_state:
+    st.session_state["exon_seq"] = ""
+if "gene_label" not in st.session_state:
+    st.session_state["gene_label"] = ""
+
+# QC + download dataframes
+if "ranked_full" not in st.session_state:
+    st.session_state["ranked_full"] = None
+if "ranked_display" not in st.session_state:
+    st.session_state["ranked_display"] = None
+if "top10" not in st.session_state:
+    st.session_state["top10"] = None
+if "top2" not in st.session_state:
+    st.session_state["top2"] = None
+if "oligos" not in st.session_state:
+    st.session_state["oligos"] = None
 
 # ============================================================
 # STEP 1 — Ensembl exon retrieval
@@ -274,7 +315,7 @@ if "gene_label" not in st.session_state: st.session_state["gene_label"]=""
 
 st.header("Step 1 — Retrieve earliest coding exon from Ensembl (hg38)")
 
-col1,col2 = st.columns([3,1])
+col1, col2 = st.columns([3, 1])
 with col1:
     gene_symbol = st.text_input(
         "Enter human gene symbol:",
@@ -299,32 +340,34 @@ if fetch_btn:
                 status.update(label="❌ Gene not found.", state="error")
                 st.stop()
 
-            gene_id = [x for x in xrefs if x.get("type")=="gene"][0]["id"]
+            gene_id = [x for x in xrefs if x.get("type") == "gene"][0]["id"]
             status.write(f"✔ Ensembl Gene ID: {gene_id}")
 
             gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
             canonical = gene_info["canonical_transcript"]
             base = canonical.split(".")[0]
-            tx = [t for t in gene_info["Transcript"] if t["id"].split(".")[0]==base][0]
+            tx = [t for t in gene_info["Transcript"] if t["id"].split(".")[0] == base][0]
 
             exons = tx["Exon"]
             df_exons = pd.DataFrame([
-                {"Exon":i,"Start":e["start"],"End":e["end"],"Phase":e.get("phase",-1),"Exon ID":e["id"]}
-                for i,e in enumerate(exons)
+                {"Exon": i, "Start": e["start"], "End": e["end"],
+                 "Phase": e.get("phase", -1), "Exon ID": e["id"]}
+                for i, e in enumerate(exons)
             ])
 
             st.subheader("Canonical transcript exons")
-            st.dataframe(df_exons[["Exon","Start","End","Exon ID"]], use_container_width=True)
+            st.dataframe(df_exons[["Exon", "Start", "End", "Exon ID"]],
+                         use_container_width=True)
 
-            coding = df_exons[df_exons["Phase"]!=-1]
-            chosen = coding.iloc[0] if len(coding)>0 else df_exons.iloc[1]
+            coding = df_exons[df_exons["Phase"] != -1]
+            chosen = coding.iloc[0] if len(coding) > 0 else df_exons.iloc[1]
 
             exon_id = chosen["Exon ID"]
 
             seq_json = ensembl_get(f"/sequence/id/{exon_id}")
             seq = clean_sequence(seq_json["seq"])
-            st.session_state["exon_seq"]=seq
-            st.session_state["gene_label"]=f"{symbol}_Exon{int(chosen['Exon'])}"
+            st.session_state["exon_seq"] = seq
+            st.session_state["gene_label"] = f"{symbol}_Exon{int(chosen['Exon'])}"
 
             st.subheader("Extracted exon sequence")
             st.code(seq)
@@ -349,7 +392,10 @@ pam_map = {
     "SaCas9 (NNGRRT)": "NNGRRT",
     "Cpf1 (TTTN)": "TTTN",
 }
-pam_choice = st.selectbox("Select PAM (local engine supports NGG only):", list(pam_map.keys()))
+pam_choice = st.selectbox(
+    "Select PAM (local engine supports NGG only):",
+    list(pam_map.keys())
+)
 pam_code = pam_map[pam_choice]
 
 run_btn = st.button("Run gRNA scoring")
@@ -359,7 +405,7 @@ if run_btn:
     if not seq:
         st.error("Please paste a valid sequence.")
     else:
-        if pam_code!="NGG":
+        if pam_code != "NGG":
             st.error("Local engine only supports SpCas9 (NGG).")
             st.stop()
 
@@ -374,7 +420,14 @@ if run_btn:
                 st.stop()
 
             status.write("Scoring & ranking guides…")
-            ranked, top10, top2, df_oligos = rank_guides_local(seq, guides)
+            ranked_display, top10, top2, df_oligos, ranked_full = rank_guides_local(seq, guides)
+
+            # Store for QC plots & downloads
+            st.session_state["ranked_full"] = ranked_full
+            st.session_state["ranked_display"] = ranked_display
+            st.session_state["top10"] = top10
+            st.session_state["top2"] = top2
+            st.session_state["oligos"] = df_oligos
 
             st.subheader("Top 10 Ranked gRNAs")
             st.dataframe(top10, use_container_width=True)
@@ -382,18 +435,146 @@ if run_btn:
             st.subheader("Top 2 gRNAs")
             st.dataframe(top2, use_container_width=True)
 
-            st.subheader("Oligos to Order")
-            st.dataframe(df_oligos, use_container_width=True)
-
-            oligo_text=[]
-            for i,row in df_oligos.iterrows():
-                oligo_text.append(f"gRNA{i+1} ({row['gRNA']}):")
-                oligo_text.append(row["Forward_5to3"])
-                oligo_text.append(row["Reverse_3to5"])
-                oligo_text.append("")
-            st.code("\n".join(oligo_text))
-
             status.update(label="✔ Completed", state="complete")
+
+st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+
+# ============================================================
+# STEP 3 — QC Analytics Dashboard
+# ============================================================
+
+st.header("Step 3 — QC Analytics Dashboard")
+
+ranked_full = st.session_state.get("ranked_full", None)
+
+if ranked_full is None:
+    st.info("Run Step 2 to generate guides before exploring QC plots.")
+elif not HAS_ALTAIR:
+    st.warning(
+        "Altair is not installed in this environment, "
+        "so interactive QC plots are disabled."
+    )
+else:
+    qc_cols = ["MIT", "EffScore", "Position_bonus", "CombinedScore"]
+
+    colA, colB, colC = st.columns([2, 2, 2])
+    with colA:
+        x_axis = st.selectbox("X-axis:", qc_cols, index=0, key="qc_x_axis")
+    with colB:
+        y_axis = st.selectbox("Y-axis:", qc_cols, index=1, key="qc_y_axis")
+    with colC:
+        mit_range = st.slider(
+            "Filter by MIT score:",
+            min_value=0,
+            max_value=100,
+            value=(0, 100),
+            step=1,
+            key="qc_mit_slider"
+        )
+
+    filtered = ranked_full[
+        (ranked_full["MIT"] >= mit_range[0]) &
+        (ranked_full["MIT"] <= mit_range[1])
+    ].copy()
+
+    # Build Altair scatter plot
+    chart = (
+        alt.Chart(filtered)
+        .mark_circle(size=80)
+        .encode(
+            x=alt.X(x_axis, title=x_axis),
+            y=alt.Y(y_axis, title=y_axis),
+            color=alt.Color(
+                "CombinedScore",
+                title="Combined score",
+                scale=alt.Scale(scheme="blues"),
+            ),
+            tooltip=[
+                "guideId",
+                "targetSeq",
+                "strand",
+                "GuidePos",
+                "MIT",
+                "EffScore",
+                "Position_bonus",
+                "CombinedScore",
+            ],
+        )
+        .properties(height=450)
+        .interactive()
+    )
+
+    st.altair_chart(chart, use_container_width=True)
+
+st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+
+# ============================================================
+# STEP 4 — Oligos to Order
+# ============================================================
+
+st.header("Step 4 — Oligos to Order")
+
+oligos = st.session_state.get("oligos", None)
+
+if oligos is None or oligos.empty:
+    st.info("Run Step 2 to generate gRNAs before viewing oligos.")
+else:
+    st.dataframe(oligos, use_container_width=True)
+
+    oligo_text = []
+    for i, row in oligos.iterrows():
+        oligo_text.append(f"gRNA{i+1} ({row['gRNA']}):")
+        oligo_text.append(row["Forward_5to3"])
+        oligo_text.append(row["Reverse_3to5"])
+        oligo_text.append("")
+    st.code("\n".join(oligo_text))
+
+st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+
+# ============================================================
+# STEP 5 — Download Centre
+# ============================================================
+
+st.header("Step 5 — Export all outputs (CSV)")
+
+ranked_display = st.session_state.get("ranked_display")
+top10 = st.session_state.get("top10")
+top2 = st.session_state.get("top2")
+oligos = st.session_state.get("oligos")
+
+if ranked_display is None:
+    st.info("Run Step 2 to unlock downloads.")
+else:
+    colD, colE, colF, colG = st.columns(4)
+
+    with colD:
+        st.download_button(
+            "Download ALL ranked guides",
+            ranked_display.to_csv(index=False).encode("utf-8"),
+            file_name="all_guides_ranked.csv",
+            mime="text/csv",
+        )
+    with colE:
+        st.download_button(
+            "Download Top 10",
+            top10.to_csv(index=False).encode("utf-8"),
+            file_name="top10_guides.csv",
+            mime="text/csv",
+        )
+    with colF:
+        st.download_button(
+            "Download Top 2",
+            top2.to_csv(index=False).encode("utf-8"),
+            file_name="top2_guides.csv",
+            mime="text/csv",
+        )
+    with colG:
+        st.download_button(
+            "Download Oligos",
+            oligos.to_csv(index=False).encode("utf-8"),
+            file_name="oligos_to_order.csv",
+            mime="text/csv",
+        )
 
 # ============================================================
 # Footer
@@ -402,7 +583,7 @@ if run_btn:
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 st.markdown(
     "<div class='footer-text'>© Kai Parkin — BBSRC DTP PhD Student "
-    "(Stem Cell Biology &amp; Regenerative Medicine), Kinoshita Lab, University of Nottingham.</div>",
+    "(Stem Cell Biology &amp; Regenerative Medicine), "
+    "Kinoshita Lab, University of Nottingham.</div>",
     unsafe_allow_html=True,
 )
-
