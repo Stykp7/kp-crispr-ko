@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # CRISPR gRNA Design Assistant (hg38)
-# Includes QC analytics dashboard + full download centre
+# Ensembl exon → Local scoring engine → Top2 oligos (Streamlit-Cloud friendly)
 
 import time
 from pathlib import Path
@@ -9,7 +9,6 @@ import re
 import pandas as pd
 import requests
 import streamlit as st
-import plotly.express as px
 
 # ============================================================
 # Basic configuration & styling
@@ -24,13 +23,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# Soft dual-mode theme (CSS only)
+# Soft dual-mode theme (CSS only – does not touch Python logic)
 st.markdown(
     """
     <style>
     body, .main, .stTextInput, .stSelectbox, .stButton, .stMarkdown {
         font-family: "Helvetica Neue", Arial, sans-serif !important;
     }
+    /* Light mode */
     @media (prefers-color-scheme: light) {
       :root {
         --bg: #ffffff;
@@ -39,6 +39,7 @@ st.markdown(
         --accent-soft: #dbeeff;
       }
     }
+    /* Dark mode */
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #0f1116;
@@ -47,29 +48,48 @@ st.markdown(
         --accent-soft: #113a4c;
       }
     }
-    body, .main { background-color: var(--bg) !important; color: var(--fg) !important; }
-    h1, h2, h3 { color: var(--accent) !important; }
-    .uol-divider { border: none; border-top: 1px solid rgba(75, 184, 240, 0.3); margin: 0.75rem 0 1.5rem 0; }
-    input[type="text"], textarea {
-        background-color: var(--accent-soft) !important; color: var(--fg) !important;
-        border-radius: 6px !important; border: 1px solid var(--accent) !important;
+    body, .main {
+        background-color: var(--bg) !important;
+        color: var(--fg) !important;
     }
-    .stButton>button { background-color: var(--accent) !important; color:white !important; }
-    .footer-text { font-size: 0.8rem; color: var(--fg); margin-top: 2rem; text-align:center; }
+    h1, h2, h3 {
+        color: var(--accent) !important;
+    }
+    .uol-divider {
+        border: none;
+        border-top: 1px solid rgba(75, 184, 240, 0.3);
+        margin: 0.75rem 0 1.5rem 0;
+    }
+    input[type="text"], textarea {
+        background-color: var(--accent-soft) !important;
+        color: var(--fg) !important;
+        border-radius: 6px !important;
+        border: 1px solid var(--accent) !important;
+    }
+    .stButton>button {
+        background-color: var(--accent) !important;
+    }
+    .footer-text {
+        font-size: 0.8rem;
+        color: var(--fg);
+        margin-top: 2rem;
+        text-align: center;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ============================================================
-# Top Banner: Logo + Title
+# Top Banner: Logo (left) + Title (right)
 # ============================================================
 
 LOGO_URL = "https://raw.githubusercontent.com/Stykp7/kp-crispr-ko/main/assets/Logo.png"
 
 col_logo, col_title = st.columns([1, 8])
+
 with col_logo:
-    st.image(LOGO_URL, width=70)
+    st.image(LOGO_URL, width=70)  # Adjust width if needed
 
 with col_title:
     st.title("CRISPR gRNA Design Assistant (hg38)")
@@ -77,7 +97,7 @@ with col_title:
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
 # ============================================================
-# Ensembl API
+# Ensembl REST API
 # ============================================================
 
 ENSEMBL_REST = "https://rest.ensembl.org"
@@ -88,35 +108,36 @@ def ensembl_get(endpoint, retries=4, delay=0.7):
     for _ in range(retries):
         try:
             r = requests.get(url, headers=HEADERS, timeout=15)
-            if r.ok: return r.json()
+            if r.ok:
+                return r.json()
         except Exception:
             pass
         time.sleep(delay)
     return None
 
 # ============================================================
-# Helper functions
+# Seq helpers
 # ============================================================
 
 def clean_sequence(seq):
     return "".join([b for b in str(seq).upper() if b in {"A","T","G","C"}])
 
 def revcomp(seq):
-    return seq.upper().translate(str.maketrans("ATGC", "TACG"))[::-1]
+    return str(seq).upper().translate(str.maketrans("ATGC", "TACG"))[::-1]
 
 # ============================================================
-# SpCas9 NGG guide finder
+# Local SpCas9 (NGG) guide finder
 # ============================================================
 
 def find_spcas9_ngg_guides(seq):
     seq = clean_sequence(seq)
     guides = []
 
-    # Forward
+    # Forward strand
     for i in range(len(seq) - 23 + 1):
         twenty = seq[i:i+20]
         pam = seq[i+20:i+23]
-        if len(pam)==3 and pam[1:]=="GG":
+        if len(pam)==3 and pam[1:]=="GG":  # NGG
             guides.append({
                 "SeqId": twenty+pam,
                 "guideId": f"fw_{i+1}",
@@ -126,7 +147,7 @@ def find_spcas9_ngg_guides(seq):
                 "GuidePos": i+1
             })
 
-    # Reverse
+    # Reverse strand
     rc = revcomp(seq)
     L = len(seq)
     for i in range(len(rc) - 23 + 1):
@@ -162,20 +183,20 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
     # forward
     for i in range(len(seq)-L+1):
         w = seq[i:i+L]
-        if w!=guide and mismatches(w,guide)<=max_mismatches:
+        if w != guide and mismatches(w, guide)<=max_mismatches:
             count+=1
 
     # reverse
     rc = revcomp(seq)
     for i in range(len(rc)-L+1):
         w = rc[i:i+L]
-        if w!=guide and mismatches(w,guide)<=max_mismatches:
+        if w != guide and mismatches(w, guide)<=max_mismatches:
             count+=1
 
     return count
 
-def mit_like_score(g):
-    g = clean_sequence(g)
+def mit_like_score(guide):
+    g = clean_sequence(guide)
     if len(g)!=20: return 0
     gc = gc_fraction(g)
     score = max(0,1-abs(gc-0.5)/0.5)*100
@@ -195,7 +216,7 @@ def efficiency_like_score(g):
 
 def rank_guides_local(seq, guides):
     if not guides:
-        return None,None,None,None,None
+        return None,None,None,None
 
     df = pd.DataFrame(guides)
 
@@ -204,10 +225,8 @@ def rank_guides_local(seq, guides):
     df["MIT"] = df["targetSeq"].apply(mit_like_score)
     df["EffScore"] = df["targetSeq"].apply(efficiency_like_score)
     df["OffTargets"] = df["targetSeq"].apply(lambda g: local_offtargets_within_seq(seq,g))
-
     max_pos = df["GuidePos"].max() or 1
     df["Position_bonus"] = 1 - df["GuidePos"]/max_pos
-
     df["MIT_norm"] = df["MIT"]/max(df["MIT"].max(),1)
     df["Off_norm"] = df["OffTargets"]/max(df["OffTargets"].max(),1)
 
@@ -220,16 +239,16 @@ def rank_guides_local(seq, guides):
 
     ranked = df.sort_values("CombinedScore", ascending=False).reset_index(drop=True)
 
-    # DISPLAY VERSIONS
+    # DROP unwanted columns ONLY in displayed tables
     drop_cols = ["GC_frac","GC_bonus","MIT_norm","OffTargets","Off_norm"]
     display_ranked = ranked.drop(columns=[c for c in drop_cols if c in ranked])
 
     top10 = display_ranked.head(10).reset_index(drop=True)
     top2 = display_ranked.head(2).reset_index(drop=True)
 
-    # OLIGOS
+    # Oligos
     oligos=[]
-    for _,row in ranked.head(2).iterrows():
+    for _,row in ranked.head(2).iterrows():  # must use full ranked
         guide = row["targetSeq"]
         u6 = guide if guide.startswith("G") else "G"+guide
         oligos.append({
@@ -240,7 +259,7 @@ def rank_guides_local(seq, guides):
         })
     df_oligos = pd.DataFrame(oligos)
 
-    return display_ranked, top10, top2, df_oligos, ranked
+    return display_ranked, top10, top2, df_oligos
 
 # ============================================================
 # Session defaults
@@ -248,10 +267,9 @@ def rank_guides_local(seq, guides):
 
 if "exon_seq" not in st.session_state: st.session_state["exon_seq"]=""
 if "gene_label" not in st.session_state: st.session_state["gene_label"]=""
-if "ranked_df" not in st.session_state: st.session_state["ranked_df"]=None
 
 # ============================================================
-# STEP 1 — Retrieve exon
+# STEP 1 — Ensembl exon retrieval
 # ============================================================
 
 st.header("Step 1 — Retrieve earliest coding exon from Ensembl (hg38)")
@@ -262,59 +280,59 @@ with col1:
         "Enter human gene symbol:",
         value="",
         placeholder="e.g YAP1",
+        help="Examples: NANOS3, YAP1, SMAD7, SOX17",
     )
 with col2:
     fetch_btn = st.button("Retrieve exons from Ensembl")
 
 if fetch_btn:
     if not gene_symbol.strip():
-        st.error("Please enter a gene.")
-        st.stop()
+        st.error("Please enter a gene symbol.")
+    else:
+        symbol = gene_symbol.strip()
+        with st.status("🔍 Querying Ensembl…", expanded=True) as status:
+            xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}?external_db=HGNC")
+            if not xrefs:
+                xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}")
 
-    symbol = gene_symbol.strip()
-    with st.status("🔍 Querying Ensembl…", expanded=True) as status:
-        xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}?external_db=HGNC")
-        if not xrefs:
-            xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}")
+            if not xrefs:
+                status.update(label="❌ Gene not found.", state="error")
+                st.stop()
 
-        if not xrefs:
-            status.update(label="❌ Gene not found", state="error")
-            st.stop()
+            gene_id = [x for x in xrefs if x.get("type")=="gene"][0]["id"]
+            status.write(f"✔ Ensembl Gene ID: {gene_id}")
 
-        gene_id = [x for x in xrefs if x.get("type")=="gene"][0]["id"]
-        status.write(f"✔ Gene ID: {gene_id}")
+            gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
+            canonical = gene_info["canonical_transcript"]
+            base = canonical.split(".")[0]
+            tx = [t for t in gene_info["Transcript"] if t["id"].split(".")[0]==base][0]
 
-        gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
-        canonical = gene_info["canonical_transcript"]
-        base = canonical.split(".")[0]
-        tx = [t for t in gene_info["Transcript"] if t["id"].split(".")[0]==base][0]
+            exons = tx["Exon"]
+            df_exons = pd.DataFrame([
+                {"Exon":i,"Start":e["start"],"End":e["end"],"Phase":e.get("phase",-1),"Exon ID":e["id"]}
+                for i,e in enumerate(exons)
+            ])
 
-        exons = tx["Exon"]
-        df_exons = pd.DataFrame([
-            {"Exon":i,"Start":e["start"],"End":e["end"],"Phase":e.get("phase",-1),"Exon ID":e["id"]}
-            for i,e in enumerate(exons)
-        ])
+            st.subheader("Canonical transcript exons")
+            st.dataframe(df_exons[["Exon","Start","End","Exon ID"]], use_container_width=True)
 
-        st.subheader("Canonical transcript exons")
-        st.dataframe(df_exons[["Exon","Start","End","Exon ID"]], use_container_width=True)
+            coding = df_exons[df_exons["Phase"]!=-1]
+            chosen = coding.iloc[0] if len(coding)>0 else df_exons.iloc[1]
 
-        coding = df_exons[df_exons["Phase"]!=-1]
-        chosen = coding.iloc[0] if len(coding)>0 else df_exons.iloc[1]
+            exon_id = chosen["Exon ID"]
 
-        exon_id = chosen["Exon ID"]
+            seq_json = ensembl_get(f"/sequence/id/{exon_id}")
+            seq = clean_sequence(seq_json["seq"])
+            st.session_state["exon_seq"]=seq
+            st.session_state["gene_label"]=f"{symbol}_Exon{int(chosen['Exon'])}"
 
-        seq_json = ensembl_get(f"/sequence/id/{exon_id}")
-        seq = clean_sequence(seq_json["seq"])
-        st.session_state["exon_seq"]=seq
-        st.session_state["gene_label"]=f"{symbol}_Exon{int(chosen['Exon'])}"
-
-        st.subheader("Extracted exon sequence")
-        st.code(seq)
+            st.subheader("Extracted exon sequence")
+            st.code(seq)
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
 # ============================================================
-# STEP 2 — Local Scoring
+# STEP 2 — Local scoring
 # ============================================================
 
 st.header("Step 2 — Run local gRNA scoring (SpCas9 NGG)")
@@ -340,154 +358,42 @@ if run_btn:
     seq = clean_sequence(seq_input)
     if not seq:
         st.error("Please paste a valid sequence.")
-        st.stop()
-    if pam_code!="NGG":
-        st.error("Local engine only supports SpCas9 NGG.")
-        st.stop()
-
-    label = st.session_state["gene_label"]
-    with st.status("🚀 Scoring guides…", expanded=True) as status:
-        status.write("Finding NGG sites…")
-        guides = find_spcas9_ngg_guides(seq)
-        if not guides:
-            status.update(label="❌ No NGG sites", state="error")
+    else:
+        if pam_code!="NGG":
+            st.error("Local engine only supports SpCas9 (NGG).")
             st.stop()
 
-        status.write("Ranking guides…")
-        display_ranked, top10, top2, df_oligos, ranked_full = rank_guides_local(seq, guides)
+        label = st.session_state["gene_label"]
 
-        st.session_state["ranked_df"] = ranked_full  # <-- for QC plots & downloads
-        st.session_state["top10"] = top10
-        st.session_state["top2"] = top2
-        st.session_state["oligos"] = df_oligos
+        with st.status("🚀 Running local scoring…", expanded=True) as status:
+            status.write("Finding NGG guides…")
+            guides = find_spcas9_ngg_guides(seq)
 
-        st.subheader("Top 10 Ranked gRNAs")
-        st.dataframe(top10, use_container_width=True)
+            if not guides:
+                status.update(label="❌ No NGG sites found.", state="error")
+                st.stop()
 
-        st.subheader("Top 2 gRNAs")
-        st.dataframe(top2, use_container_width=True)
+            status.write("Scoring & ranking guides…")
+            ranked, top10, top2, df_oligos = rank_guides_local(seq, guides)
 
-        status.update(label="✔ Completed", state="complete")
+            st.subheader("Top 10 Ranked gRNAs")
+            st.dataframe(top10, use_container_width=True)
 
-st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+            st.subheader("Top 2 gRNAs")
+            st.dataframe(top2, use_container_width=True)
 
-# ============================================================
-# STEP 3 — QC Analytics Dashboard
-# ============================================================
+            st.subheader("Oligos to Order")
+            st.dataframe(df_oligos, use_container_width=True)
 
-st.header("Step 3 — QC Analytics Dashboard")
+            oligo_text=[]
+            for i,row in df_oligos.iterrows():
+                oligo_text.append(f"gRNA{i+1} ({row['gRNA']}):")
+                oligo_text.append(row["Forward_5to3"])
+                oligo_text.append(row["Reverse_3to5"])
+                oligo_text.append("")
+            st.code("\n".join(oligo_text))
 
-ranked_df = st.session_state.get("ranked_df", None)
-
-if ranked_df is None:
-    st.info("Run Step 2 first to generate QC plots.")
-else:
-    qc_cols = ["MIT", "EffScore", "Position_bonus", "CombinedScore"]
-
-    colA, colB, colC = st.columns([2,2,2])
-    with colA:
-        x_axis = st.selectbox("X-axis:", qc_cols, index=0)
-    with colB:
-        y_axis = st.selectbox("Y-axis:", qc_cols, index=1)
-    with colC:
-        mit_filter = st.slider(
-            "Filter by MIT Score:",
-            min_value=0, max_value=100, value=(0,100)
-        )
-
-    filtered = ranked_df[
-        (ranked_df["MIT"] >= mit_filter[0]) &
-        (ranked_df["MIT"] <= mit_filter[1])
-    ]
-
-    fig = px.scatter(
-        filtered,
-        x=x_axis,
-        y=y_axis,
-        hover_data=["guideId","targetSeq","strand","GuidePos"],
-        color="CombinedScore",
-        color_continuous_scale=px.colors.sequential.Blues,
-        template="plotly_dark",
-        height=500,
-    )
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="var(--fg)"),
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
-
-# ============================================================
-# STEP 4 — Oligos to Order
-# ============================================================
-
-st.header("Step 4 — Oligos to Order")
-
-top2 = st.session_state.get("top2", None)
-oligos = st.session_state.get("oligos", None)
-
-if oligos is None:
-    st.info("Run Step 2 first to generate oligos.")
-else:
-    st.dataframe(oligos, use_container_width=True)
-
-    oligo_text=[]
-    for i,row in oligos.iterrows():
-        oligo_text.append(f"gRNA{i+1} ({row['gRNA']}):")
-        oligo_text.append(row["Forward_5to3"])
-        oligo_text.append(row["Reverse_3to5"])
-        oligo_text.append("")
-    st.code("\n".join(oligo_text))
-
-st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
-
-# ============================================================
-# STEP 5 — Download Centre
-# ============================================================
-
-st.header("Step 5 — Export All Outputs")
-
-ranked_df = st.session_state.get("ranked_df")
-top10 = st.session_state.get("top10")
-top2 = st.session_state.get("top2")
-oligos = st.session_state.get("oligos")
-
-if ranked_df is None:
-    st.info("Run Step 2 to unlock downloads.")
-else:
-    colD, colE, colF, colG = st.columns(4)
-
-    with colD:
-        st.download_button(
-            "Download ALL ranked guides (CSV)",
-            ranked_df.to_csv(index=False).encode(),
-            file_name="all_guides_ranked.csv",
-            mime="text/csv"
-        )
-    with colE:
-        st.download_button(
-            "Download Top 10 (CSV)",
-            top10.to_csv(index=False).encode(),
-            file_name="top10_guides.csv",
-            mime="text/csv"
-        )
-    with colF:
-        st.download_button(
-            "Download Top 2 (CSV)",
-            top2.to_csv(index=False).encode(),
-            file_name="top2_guides.csv",
-            mime="text/csv"
-        )
-    with colG:
-        st.download_button(
-            "Download Oligos (CSV)",
-            oligos.to_csv(index=False).encode(),
-            file_name="oligos.csv",
-            mime="text/csv"
-        )
+            status.update(label="✔ Completed", state="complete")
 
 # ============================================================
 # Footer
@@ -499,3 +405,4 @@ st.markdown(
     "(Stem Cell Biology &amp; Regenerative Medicine), Kinoshita Lab, University of Nottingham.</div>",
     unsafe_allow_html=True,
 )
+
