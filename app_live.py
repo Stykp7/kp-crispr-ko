@@ -26,7 +26,7 @@ DATA_DIR = APP_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(
-    page_title="CRISPR gRNA Design Assistant (hg38)",
+    page_title="CRISPR KO gRNA Design Assistant (hg38)",
     layout="wide",
 )
 
