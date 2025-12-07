@@ -68,7 +68,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ========================
+# Logo Banner
+# ========================
+st.markdown(
+    """
+    <div style='text-align: center; margin-bottom: 20px;'>
+        <img src='https://raw.githubusercontent.com/stykp7/kp-crispr-ko/main/assets/logo.png'
+             style='width: 180px; max-width: 40%; border-radius: 12px;'>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("CRISPR gRNA Design Assistant (hg38)")
+
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
 # ============================================================
