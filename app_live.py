@@ -584,6 +584,6 @@ st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 st.markdown(
     "<div class='footer-text'>© Kai Parkin — BBSRC DTP PhD Student "
     "(Stem Cell Biology &amp; Regenerative Medicine), "
-    "Kinoshita Lab, University of Nottingham.</div>",
+    "Kinoshita Lab, University of Nottingham (2025).</div>",
     unsafe_allow_html=True,
 )
