@@ -10,14 +10,14 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# Try Altair for QC plots
+# Altair for QC plots
 try:
     import altair as alt
     HAS_ALTAIR = True
 except ImportError:
     HAS_ALTAIR = False
 
-# Try Matplotlib for exon visualization
+# Matplotlib for exon visualization
 try:
     import matplotlib.pyplot as plt
     HAS_MPL = True
@@ -167,45 +167,147 @@ def revcomp(seq):
 
 
 # ============================================================
-# Local SpCas9 NGG guide finder
+# PAM helpers & generic guide finder
 # ============================================================
 
-def find_spcas9_ngg_guides(seq):
+IUPAC = {
+    "A": {"A"},
+    "C": {"C"},
+    "G": {"G"},
+    "T": {"T"},
+    "N": {"A", "C", "G", "T"},
+    "R": {"A", "G"},
+    "Y": {"C", "T"},
+    "S": {"G", "C"},
+    "W": {"A", "T"},
+    "K": {"G", "T"},
+    "M": {"A", "C"},
+    "B": {"C", "G", "T"},
+    "D": {"A", "G", "T"},
+    "H": {"A", "C", "T"},
+    "V": {"A", "C", "G"},
+}
+
+
+NUCLEASES = {
+    "SpCas9 (NGG, 20nt)": {
+        "pam": "NGG",
+        "pam_orientation": "3prime",  # PAM 3' to guide
+        "guide_len": 20,
+    },
+    "SpCas9-VRQR (NGA)": {
+        "pam": "NGA",
+        "pam_orientation": "3prime",
+        "guide_len": 20,
+    },
+    "SaCas9 (NNGRRT)": {
+        "pam": "NNGRRT",
+        "pam_orientation": "3prime",
+        "guide_len": 21,
+    },
+    "Cpf1 (TTTN)": {
+        "pam": "TTTN",
+        "pam_orientation": "5prime",  # PAM 5' to guide
+        "guide_len": 23,
+    },
+}
+
+
+def pam_matches(pam_seq: str, pam_pattern: str) -> bool:
+    pam_seq = pam_seq.upper()
+    pam_pattern = pam_pattern.upper()
+    if len(pam_seq) != len(pam_pattern):
+        return False
+    for b, p in zip(pam_seq, pam_pattern):
+        allowed = IUPAC.get(p, {p})
+        if b not in allowed:
+            return False
+    return True
+
+
+def find_guides_generic(seq: str, nuclease_label: str):
+    """
+    Generic guide finder for multiple PAMs / nucleases.
+    Returns list of dicts like old find_spcas9_ngg_guides.
+    """
     seq = clean_sequence(seq)
+    if nuclease_label not in NUCLEASES:
+        raise ValueError(f"Unknown nuclease: {nuclease_label}")
+
+    cfg = NUCLEASES[nuclease_label]
+    pam_pattern = cfg["pam"]
+    orientation = cfg["pam_orientation"]
+    guide_len = cfg["guide_len"]
+
+    pam_len = len(pam_pattern)
+    window_len = guide_len + pam_len
+    L = len(seq)
     guides = []
 
-    # Forward
-    for i in range(len(seq) - 23 + 1):
-        twenty = seq[i:i + 20]
-        pam = seq[i + 20:i + 23]
-        if len(pam) == 3 and pam[1:] == "GG":
-            guides.append({
-                "SeqId": twenty + pam,
-                "guideId": f"fw_{i + 1}",
-                "targetSeq": twenty,
-                "PAM": pam,
-                "strand": "+",
-                "GuidePos": i + 1
-            })
+    # ---- Plus strand ----
+    if orientation == "3prime":
+        for i in range(L - window_len + 1):
+            guide = seq[i : i + guide_len]
+            pam_seq = seq[i + guide_len : i + window_len]
+            if pam_matches(pam_seq, pam_pattern):
+                guides.append(
+                    {
+                        "SeqId": guide + pam_seq,
+                        "guideId": f"fw_{i + 1}",
+                        "targetSeq": guide,
+                        "PAM": pam_seq,
+                        "strand": "+",
+                        "GuidePos": i + 1,  # 1-based start of guide
+                    }
+                )
+    elif orientation == "5prime":
+        for i in range(L - window_len + 1):
+            pam_seq = seq[i : i + pam_len]
+            guide = seq[i + pam_len : i + window_len]
+            if pam_matches(pam_seq, pam_pattern):
+                guides.append(
+                    {
+                        "SeqId": pam_seq + guide,
+                        "guideId": f"fw_{i + 1}",
+                        "targetSeq": guide,
+                        "PAM": pam_seq,
+                        "strand": "+",
+                        "GuidePos": i + pam_len,  # guide start
+                    }
+                )
 
-    # Reverse
-    rc = revcomp(seq)
-    L = len(seq)
-    for i in range(len(rc) - 23 + 1):
-        twenty = rc[i:i + 20]
-        pam = rc[i + 20:i + 23]
-        if len(pam) == 3 and pam[1:] == "GG":
-            start_original = L - (i + 23) + 1
-            guides.append({
-                "SeqId": twenty + pam,
+    # ---- Minus strand ----
+    # Work on reverse complement with "guide+PAM" window and map back
+    rc_seq = revcomp(seq)
+    for i in range(len(rc_seq) - window_len + 1):
+        guide_rc = rc_seq[i : i + guide_len]
+        pam_rc = rc_seq[i + guide_len : i + window_len]
+
+        # rc orientation always "guide+PAM" (3' PAM), so we just test as such
+        if not pam_matches(pam_rc, pam_pattern):
+            continue
+
+        # Map to original coordinates (1-based)
+        # We approximate GuidePos as the 1-based position of the window's first base.
+        start_original = L - (i + window_len) + 1
+
+        guides.append(
+            {
+                "SeqId": guide_rc + pam_rc,
                 "guideId": f"rv_{start_original}",
-                "targetSeq": twenty,
-                "PAM": pam,
+                "targetSeq": guide_rc,
+                "PAM": pam_rc,
                 "strand": "-",
-                "GuidePos": start_original
-            })
+                "GuidePos": start_original,
+            }
+        )
+
     return guides
 
+
+# ============================================================
+# Scoring functions
+# ============================================================
 
 def gc_fraction(seq):
     seq = clean_sequence(seq)
@@ -224,14 +326,14 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
 
     # forward
     for i in range(len(seq) - L + 1):
-        w = seq[i:i + L]
+        w = seq[i : i + L]
         if w != guide and mismatches(w, guide) <= max_mismatches:
             count += 1
 
     # reverse
-    rc = revcomp(seq)
-    for i in range(len(rc) - L + 1):
-        w = rc[i:i + L]
+    rc_seq = revcomp(seq)
+    for i in range(len(rc_seq) - L + 1):
+        w = rc_seq[i : i + L]
         if w != guide and mismatches(w, guide) <= max_mismatches:
             count += 1
 
@@ -239,24 +341,36 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
 
 
 def mit_like_score(guide):
+    """
+    Very simplified on-target-like score based mostly on GC content.
+    Now works for variable guide lengths (>= 15 nt).
+    """
     g = clean_sequence(guide)
-    if len(g) != 20:
+    if len(g) < 15:
         return 0
     gc = gc_fraction(g)
     score = max(0, 1 - abs(gc - 0.5) / 0.5) * 100
+    # Last base preference (use last base of guide, not position 20)
+    if g[-1] == "G":
+        score *= 1.05
+    # Penalty if 5' base is A
+    if g[0] == "A":
+        score *= 0.95
+    # Penalty for polyT
     if "TTTT" in g:
         score *= 0.7
-    if gc < 0.3 or gc > 0.7:
-        score *= 0.8
-    return score
+    return max(0, min(100, score))
 
 
 def efficiency_like_score(g):
+    """
+    Simple efficiency-like heuristic usable for guides of varying length.
+    """
     g = clean_sequence(g)
-    if len(g) != 20:
+    if len(g) < 15:
         return 0
-    score = 50
-    if g[19] == "G":
+    score = 50.0
+    if g[-1] == "G":
         score += 10
     if g[0] == "A":
         score -= 5
@@ -304,7 +418,6 @@ def rank_guides_local(seq, guides):
 
     ranked_full = df.sort_values("CombinedScore", ascending=False).reset_index(drop=True)
 
-    # DROP unwanted columns ONLY in displayed tables
     drop_cols = ["GC_frac", "GC_bonus", "MIT_norm", "OffTargets", "Off_norm"]
     display_ranked = ranked_full.drop(columns=[c for c in drop_cols if c in ranked_full])
 
@@ -316,12 +429,14 @@ def rank_guides_local(seq, guides):
     for _, row in ranked_full.head(2).iterrows():
         guide = row["targetSeq"]
         u6 = guide if guide.startswith("G") else "G" + guide
-        oligos.append({
-            "gRNA": row["guideId"],
-            "GuideSeq": guide,
-            "Forward_5to3": "CACC" + u6,
-            "Reverse_3to5": "AAAC" + revcomp(u6)
-        })
+        oligos.append(
+            {
+                "gRNA": row["guideId"],
+                "GuideSeq": guide,
+                "Forward_5to3": "CACC" + u6,
+                "Reverse_3to5": "AAAC" + revcomp(u6),
+            }
+        )
     df_oligos = pd.DataFrame(oligos)
 
     return display_ranked, top10, top2, df_oligos, ranked_full
@@ -344,7 +459,6 @@ if "cds_info" not in st.session_state:
 if "selected_exon_index" not in st.session_state:
     st.session_state["selected_exon_index"] = None
 
-# QC + download dataframes
 for key in ["ranked_full", "ranked_display", "top10", "top2", "oligos"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -358,42 +472,38 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
     if not HAS_MPL or df_exons is None or df_exons.empty:
         return None
 
-    fig, ax = plt.subplots(figsize=(8, 1.4))
+    fig, ax = plt.subplots(figsize=(8, 1.6))
 
     # Genomic span
     g_start = df_exons["Start"].min()
     g_end = df_exons["End"].max()
     g_len = max(g_end - g_start, 1)
 
-    # Draw exons as boxes along a horizontal line
     y = 0.3
     height = 0.3
 
-    # Sort exons by genomic coordinate
     df_sorted = df_exons.sort_values("Start")
 
     for _, row in df_sorted.iterrows():
         x0 = row["Start"] - g_start
         width = row["End"] - row["Start"]
-        is_coding = row.get("IsCoding", False)
+        is_coding = bool(row.get("IsCoding", False))
         exon_idx = int(row["Exon"])
 
-        # Colors: grey for UTR, blue for coding
         facecolor = "#c0c0c0" if not is_coding else "#4bb8f0"
         edgecolor = "#000000"
-
-        # Highlight selected exon with thicker edge
         lw = 2.5 if exon_idx == selected_exon_index else 1.0
 
         rect = plt.Rectangle(
-            (x0, y), width, height,
+            (x0, y),
+            width,
+            height,
             facecolor=facecolor,
             edgecolor=edgecolor,
-            linewidth=lw
+            linewidth=lw,
         )
         ax.add_patch(rect)
 
-        # Label exons above
         ax.text(
             x0 + width / 2,
             y + height + 0.1,
@@ -403,10 +513,12 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
             fontsize=8,
         )
 
-    # Draw genomic baseline
-    ax.hlines(y + height / 2, 0, g_len, colors="#666666", linestyles="dotted", linewidth=1)
+    # Baseline
+    ax.hlines(
+        y + height / 2, 0, g_len, colors="#666666", linestyles="dotted", linewidth=1
+    )
 
-    # Mark CDS start if present
+    # CDS start
     if cds_info and cds_info.get("has_cds"):
         cds_first = cds_info.get("cds_first_coord")
         if cds_first is not None:
@@ -419,10 +531,13 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
                 linestyles="--",
                 linewidth=1.5,
             )
+            label = (
+                "CDS start" if cds_info.get("strand", 1) == 1 else "CDS start (rev)"
+            )
             ax.text(
                 x_cds,
                 y - 0.15,
-                "CDS start" if cds_info.get("strand", 1) == 1 else "CDS start (rev)",
+                label,
                 ha="center",
                 va="top",
                 fontsize=7,
@@ -452,7 +567,6 @@ with col1:
 with col2:
     fetch_btn = st.button("Retrieve exons")
 
-# On fetch, query Ensembl and populate session_state with exon + CDS info
 if fetch_btn:
     sp = current_species["ensembl_species"]
 
@@ -480,39 +594,46 @@ if fetch_btn:
             gene_id = gene_candidates[0]["id"]
             status.write(f"✔ Ensembl Gene ID: {gene_id}")
 
-            # 2) Get canonical transcript with exons and translation
+            # 2) Get canonical transcript
             gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
             if not gene_info or "Transcript" not in gene_info:
-                status.update(label="❌ No transcript information found.", state="error")
+                status.update(
+                    label="❌ No transcript information found.", state="error"
+                )
                 st.stop()
 
             canonical = gene_info["canonical_transcript"]
             base = canonical.split(".")[0]
             tx_list = [t for t in gene_info["Transcript"] if t["id"].split(".")[0] == base]
             if not tx_list:
-                status.update(label="❌ Canonical transcript not found.", state="error")
+                status.update(
+                    label="❌ Canonical transcript not found.", state="error"
+                )
                 st.stop()
 
             tx = tx_list[0]
             strand = tx.get("strand", gene_info.get("strand", 1))
-
             exons = tx.get("Exon", [])
             if not exons:
-                status.update(label="❌ No exon information for transcript.", state="error")
+                status.update(
+                    label="❌ No exon information for transcript.", state="error"
+                )
                 st.stop()
 
-            # Build exon dataframe
-            df_exons = pd.DataFrame([
-                {
-                    "Exon": int(i),
-                    "Start": e["start"],
-                    "End": e["end"],
-                    "Exon ID": e["id"],
-                }
-                for i, e in enumerate(exons)
-            ])
+            # Build exon dataframe (1-based exon indices, matching Ensembl)
+            df_exons = pd.DataFrame(
+                [
+                    {
+                        "Exon": int(i + 1),
+                        "Start": e["start"],
+                        "End": e["end"],
+                        "Exon ID": e["id"],
+                    }
+                    for i, e in enumerate(exons)
+                ]
+            )
 
-            # 3) Determine CDS range and first coding exon using Translation
+            # 3) CDS / translation info
             transl = tx.get("Translation", None)
             cds_info = {
                 "has_cds": False,
@@ -531,41 +652,45 @@ if fetch_btn:
                 cds_min = min(cds_start, cds_end)
                 cds_max = max(cds_start, cds_end)
 
-                # On + strand CDS starts at cds_start, on - strand at cds_end
                 cds_first_coord = cds_start if strand == 1 else cds_end
 
-                cds_info.update({
-                    "has_cds": True,
-                    "cds_start": cds_start,
-                    "cds_end": cds_end,
-                    "cds_min": cds_min,
-                    "cds_max": cds_max,
-                    "cds_first_coord": cds_first_coord,
-                })
+                cds_info.update(
+                    {
+                        "has_cds": True,
+                        "cds_start": cds_start,
+                        "cds_end": cds_end,
+                        "cds_min": cds_min,
+                        "cds_max": cds_max,
+                        "cds_first_coord": cds_first_coord,
+                    }
+                )
 
-                # Flag coding exons
-                coding_indices = []
                 is_coding_flags = []
+                coding_indices = []
+
                 for _, row in df_exons.iterrows():
                     start, end = row["Start"], row["End"]
-                    is_coding = not (end < cds_min or start > cds_max)
+                    # Overlap with CDS region
+                    overlap_start = max(start, cds_min)
+                    overlap_end = min(end, cds_max)
+                    coding_len = max(0, overlap_end - overlap_start + 1)
+                    exon_len = end - start + 1
+                    is_coding = coding_len > 0
                     is_coding_flags.append(is_coding)
+
                     if is_coding and start <= cds_first_coord <= end:
                         coding_indices.append(int(row["Exon"]))
-                df_exons["IsCoding"] = is_coding_flags
 
+                df_exons["IsCoding"] = is_coding_flags
                 first_coding_exon_index = coding_indices[0] if coding_indices else None
                 cds_info["first_coding_exon_index"] = first_coding_exon_index
-
             else:
-                # No translation → non-coding transcript
                 df_exons["IsCoding"] = False
 
-            # Store in session_state
             st.session_state["exons_df"] = df_exons
             st.session_state["cds_info"] = cds_info
 
-            # Choose default exon: first coding if available, else exon 0
+            # Default exon: first coding exon if available, else exon 1
             default_exon_index = (
                 cds_info.get("first_coding_exon_index")
                 if cds_info.get("first_coding_exon_index") is not None
@@ -650,13 +775,15 @@ if df_exons is not None:
     # Exon structure plot
     if HAS_MPL:
         st.subheader("Exon structure (canonical transcript)")
-        fig = plot_exon_structure(df_exons, cds_info, st.session_state["selected_exon_index"])
+        fig = plot_exon_structure(
+            df_exons, cds_info, st.session_state["selected_exon_index"]
+        )
         if fig is not None:
             st.pyplot(fig)
     else:
         st.info(
             "Matplotlib is not installed in this environment, so the exon structure "
-            "diagram cannot be displayed."
+            "diagram cannot be displayed. Add 'matplotlib' to requirements.txt to enable."
         )
 
     # Show selected exon sequence
@@ -670,7 +797,7 @@ st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 # STEP 2 — Local scoring
 # ============================================================
 
-st.header("Step 2 — Run local gRNA scoring (SpCas9 NGG)")
+st.header("Step 2 — Run local gRNA scoring")
 
 seq_input = st.text_area(
     "Exon sequence (A/T/G/C only):",
@@ -678,18 +805,10 @@ seq_input = st.text_area(
     height=160,
 )
 
-pam_map = {
-    "SpCas9 (NGG, 20nt)": "NGG",
-    "SpCas9-VRQR (NGA)": "NGA",
-    "SaCas9 (NNGRRT)": "NNGRRT",
-    "Cpf1 (TTTN)": "TTTN",
-}
-
 pam_choice = st.selectbox(
-    "Select PAM (local engine supports NGG only):",
-    list(pam_map.keys())
+    "Select nuclease / PAM:",
+    list(NUCLEASES.keys()),
 )
-pam_code = pam_map[pam_choice]
 
 run_btn = st.button("Run gRNA scoring")
 
@@ -698,22 +817,20 @@ if run_btn:
     if not seq:
         st.error("Please paste a valid sequence.")
     else:
-        if pam_code != "NGG":
-            st.error("Local engine currently supports only SpCas9 (NGG).")
-            st.stop()
-
-        label = st.session_state["gene_label"]
+        nuc_label = pam_choice
 
         with st.status("🚀 Running local scoring…", expanded=True) as status:
-            status.write("Finding NGG guides…")
-            guides = find_spcas9_ngg_guides(seq)
+            status.write(f"Finding guides for {nuc_label}…")
+            guides = find_guides_generic(seq, nuc_label)
 
             if not guides:
-                status.update(label="❌ No NGG sites found.", state="error")
+                status.update(label="❌ No valid PAM sites found.", state="error")
                 st.stop()
 
             status.write("Scoring & ranking guides…")
-            ranked_display, top10, top2, df_oligos, ranked_full = rank_guides_local(seq, guides)
+            ranked_display, top10, top2, df_oligos, ranked_full = rank_guides_local(
+                seq, guides
+            )
 
             st.session_state["ranked_full"] = ranked_full
             st.session_state["ranked_display"] = ranked_display
@@ -759,12 +876,12 @@ else:
             max_value=100,
             value=(0, 100),
             step=1,
-            key="qc_mit_slider"
+            key="qc_mit_slider",
         )
 
     filtered = ranked_full[
-        (ranked_full["MIT"] >= mit_range[0]) &
-        (ranked_full["MIT"] <= mit_range[1])
+        (ranked_full["MIT"] >= mit_range[0])
+        & (ranked_full["MIT"] <= mit_range[1])
     ].copy()
 
     chart = (
