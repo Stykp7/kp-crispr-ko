@@ -4,7 +4,6 @@
 
 import time
 from pathlib import Path
-import re
 
 import pandas as pd
 import requests
@@ -167,7 +166,7 @@ def revcomp(seq):
 
 
 # ============================================================
-# PAM helpers & generic guide finder
+# PAM helpers & generic guide finder (multi-nuclease)
 # ============================================================
 
 IUPAC = {
@@ -188,11 +187,10 @@ IUPAC = {
     "V": {"A", "C", "G"},
 }
 
-
 NUCLEASES = {
     "SpCas9 (NGG, 20nt)": {
         "pam": "NGG",
-        "pam_orientation": "3prime",  # PAM 3' to guide
+        "pam_orientation": "3prime",  # PAM at 3' end of guide
         "guide_len": 20,
     },
     "SpCas9-VRQR (NGA)": {
@@ -200,14 +198,14 @@ NUCLEASES = {
         "pam_orientation": "3prime",
         "guide_len": 20,
     },
-    "SaCas9 (NNGRRT)": {
+    "SaCas9 (NNGRRT, 21nt)": {
         "pam": "NNGRRT",
         "pam_orientation": "3prime",
         "guide_len": 21,
     },
-    "Cpf1 (TTTN)": {
+    "Cpf1 (TTTN, 23nt)": {
         "pam": "TTTN",
-        "pam_orientation": "5prime",  # PAM 5' to guide
+        "pam_orientation": "5prime",  # PAM at 5' end of guide
         "guide_len": 23,
     },
 }
@@ -228,7 +226,7 @@ def pam_matches(pam_seq: str, pam_pattern: str) -> bool:
 def find_guides_generic(seq: str, nuclease_label: str):
     """
     Generic guide finder for multiple PAMs / nucleases.
-    Returns list of dicts like old find_spcas9_ngg_guides.
+    Returns list of dicts: SeqId, guideId, targetSeq, PAM, strand, GuidePos.
     """
     seq = clean_sequence(seq)
     if nuclease_label not in NUCLEASES:
@@ -244,11 +242,12 @@ def find_guides_generic(seq: str, nuclease_label: str):
     L = len(seq)
     guides = []
 
-    # ---- Plus strand ----
+    # ---------- Plus strand ----------
     if orientation == "3prime":
+        # guide + PAM
         for i in range(L - window_len + 1):
-            guide = seq[i : i + guide_len]
-            pam_seq = seq[i + guide_len : i + window_len]
+            guide = seq[i: i + guide_len]
+            pam_seq = seq[i + guide_len: i + window_len]
             if pam_matches(pam_seq, pam_pattern):
                 guides.append(
                     {
@@ -257,13 +256,14 @@ def find_guides_generic(seq: str, nuclease_label: str):
                         "targetSeq": guide,
                         "PAM": pam_seq,
                         "strand": "+",
-                        "GuidePos": i + 1,  # 1-based start of guide
+                        "GuidePos": i + 1,
                     }
                 )
-    elif orientation == "5prime":
+    else:  # 5prime
+        # PAM + guide
         for i in range(L - window_len + 1):
-            pam_seq = seq[i : i + pam_len]
-            guide = seq[i + pam_len : i + window_len]
+            pam_seq = seq[i: i + pam_len]
+            guide = seq[i + pam_len: i + window_len]
             if pam_matches(pam_seq, pam_pattern):
                 guides.append(
                     {
@@ -272,41 +272,57 @@ def find_guides_generic(seq: str, nuclease_label: str):
                         "targetSeq": guide,
                         "PAM": pam_seq,
                         "strand": "+",
-                        "GuidePos": i + pam_len,  # guide start
+                        "GuidePos": i + pam_len + 1,
                     }
                 )
 
-    # ---- Minus strand ----
-    # Work on reverse complement with "guide+PAM" window and map back
+    # ---------- Minus strand (via reverse complement) ----------
     rc_seq = revcomp(seq)
-    for i in range(len(rc_seq) - window_len + 1):
-        guide_rc = rc_seq[i : i + guide_len]
-        pam_rc = rc_seq[i + guide_len : i + window_len]
 
-        # rc orientation always "guide+PAM" (3' PAM), so we just test as such
-        if not pam_matches(pam_rc, pam_pattern):
-            continue
-
-        # Map to original coordinates (1-based)
-        # We approximate GuidePos as the 1-based position of the window's first base.
-        start_original = L - (i + window_len) + 1
-
-        guides.append(
-            {
-                "SeqId": guide_rc + pam_rc,
-                "guideId": f"rv_{start_original}",
-                "targetSeq": guide_rc,
-                "PAM": pam_rc,
-                "strand": "-",
-                "GuidePos": start_original,
-            }
-        )
+    if orientation == "3prime":
+        # guide + PAM on RC
+        for i in range(len(rc_seq) - window_len + 1):
+            guide_rc = rc_seq[i: i + guide_len]
+            pam_rc = rc_seq[i + guide_len: i + window_len]
+            if not pam_matches(pam_rc, pam_pattern):
+                continue
+            start_original = L - (i + window_len) + 1  # 1-based guide start
+            guides.append(
+                {
+                    "SeqId": guide_rc + pam_rc,
+                    "guideId": f"rv_{start_original}",
+                    "targetSeq": guide_rc,
+                    "PAM": pam_rc,
+                    "strand": "-",
+                    "GuidePos": start_original,
+                }
+            )
+    else:
+        # 5prime: PAM + guide on RC
+        for i in range(len(rc_seq) - window_len + 1):
+            pam_rc = rc_seq[i: i + pam_len]
+            guide_rc = rc_seq[i + pam_len: i + window_len]
+            if not pam_matches(pam_rc, pam_pattern):
+                continue
+            # Approximate guide start position on original strand
+            window_start_original = L - (i + window_len) + 1
+            guide_start_original = window_start_original + pam_len
+            guides.append(
+                {
+                    "SeqId": pam_rc + guide_rc,
+                    "guideId": f"rv_{guide_start_original}",
+                    "targetSeq": guide_rc,
+                    "PAM": pam_rc,
+                    "strand": "-",
+                    "GuidePos": guide_start_original,
+                }
+            )
 
     return guides
 
 
 # ============================================================
-# Scoring functions
+# Scoring functions (length-agnostic)
 # ============================================================
 
 def gc_fraction(seq):
@@ -326,14 +342,14 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
 
     # forward
     for i in range(len(seq) - L + 1):
-        w = seq[i : i + L]
+        w = seq[i: i + L]
         if w != guide and mismatches(w, guide) <= max_mismatches:
             count += 1
 
     # reverse
     rc_seq = revcomp(seq)
     for i in range(len(rc_seq) - L + 1):
-        w = rc_seq[i : i + L]
+        w = rc_seq[i: i + L]
         if w != guide and mismatches(w, guide) <= max_mismatches:
             count += 1
 
@@ -341,31 +357,23 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
 
 
 def mit_like_score(guide):
-    """
-    Very simplified on-target-like score based mostly on GC content.
-    Now works for variable guide lengths (>= 15 nt).
-    """
+    """Very simplified on-target-like score, works for variable length."""
     g = clean_sequence(guide)
     if len(g) < 15:
         return 0
     gc = gc_fraction(g)
     score = max(0, 1 - abs(gc - 0.5) / 0.5) * 100
-    # Last base preference (use last base of guide, not position 20)
     if g[-1] == "G":
         score *= 1.05
-    # Penalty if 5' base is A
     if g[0] == "A":
         score *= 0.95
-    # Penalty for polyT
     if "TTTT" in g:
         score *= 0.7
     return max(0, min(100, score))
 
 
 def efficiency_like_score(g):
-    """
-    Simple efficiency-like heuristic usable for guides of varying length.
-    """
+    """Simple efficiency heuristic (variable length)."""
     g = clean_sequence(g)
     if len(g) < 15:
         return 0
@@ -424,7 +432,7 @@ def rank_guides_local(seq, guides):
     top10 = display_ranked.head(10).reset_index(drop=True)
     top2 = display_ranked.head(2).reset_index(drop=True)
 
-    # Oligos (based on full ranked table)
+    # Oligos (SpCas9-style cloning; adapt manually for other nucleases if needed)
     oligos = []
     for _, row in ranked_full.head(2).iterrows():
         guide = row["targetSeq"]
@@ -446,26 +454,27 @@ def rank_guides_local(seq, guides):
 # Session defaults
 # ============================================================
 
-if "exon_seq" not in st.session_state:
-    st.session_state["exon_seq"] = ""
-if "gene_label" not in st.session_state:
-    st.session_state["gene_label"] = ""
-if "gene_symbol" not in st.session_state:
-    st.session_state["gene_symbol"] = ""
-if "exons_df" not in st.session_state:
-    st.session_state["exons_df"] = None
-if "cds_info" not in st.session_state:
-    st.session_state["cds_info"] = None
-if "selected_exon_index" not in st.session_state:
-    st.session_state["selected_exon_index"] = None
-
-for key in ["ranked_full", "ranked_display", "top10", "top2", "oligos"]:
+for key, default in [
+    ("exon_seq", ""),
+    ("gene_label", ""),
+    ("gene_symbol", ""),
+    ("exons_df", None),
+    ("cds_info", None),
+    ("selected_exon_index", None),
+    ("first_coding_exon_index", None),
+    ("recommended_exon_index", None),
+    ("ranked_full", None),
+    ("ranked_display", None),
+    ("top10", None),
+    ("top2", None),
+    ("oligos", None),
+]:
     if key not in st.session_state:
-        st.session_state[key] = None
+        st.session_state[key] = default
 
 
 # ============================================================
-# Helper for exon visualization
+# Helper: exon visualization + sequence extraction
 # ============================================================
 
 def plot_exon_structure(df_exons, cds_info, selected_exon_index):
@@ -474,14 +483,12 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
 
     fig, ax = plt.subplots(figsize=(8, 1.6))
 
-    # Genomic span
     g_start = df_exons["Start"].min()
     g_end = df_exons["End"].max()
     g_len = max(g_end - g_start, 1)
 
     y = 0.3
     height = 0.3
-
     df_sorted = df_exons.sort_values("Start")
 
     for _, row in df_sorted.iterrows():
@@ -513,12 +520,8 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
             fontsize=8,
         )
 
-    # Baseline
-    ax.hlines(
-        y + height / 2, 0, g_len, colors="#666666", linestyles="dotted", linewidth=1
-    )
+    ax.hlines(y + height / 2, 0, g_len, colors="#666666", linestyles="dotted", linewidth=1)
 
-    # CDS start
     if cds_info and cds_info.get("has_cds"):
         cds_first = cds_info.get("cds_first_coord")
         if cds_first is not None:
@@ -531,9 +534,7 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
                 linestyles="--",
                 linewidth=1.5,
             )
-            label = (
-                "CDS start" if cds_info.get("strand", 1) == 1 else "CDS start (rev)"
-            )
+            label = "CDS start" if cds_info.get("strand", 1) == 1 else "CDS start (rev)"
             ax.text(
                 x_cds,
                 y - 0.15,
@@ -548,6 +549,25 @@ def plot_exon_structure(df_exons, cds_info, selected_exon_index):
     ax.axis("off")
     fig.tight_layout()
     return fig
+
+
+def fetch_exon_sequence(row, cds_info):
+    """
+    Retrieve exon sequence from Ensembl and crop to coding region
+    if the exon overlaps CDS (KO design safety).
+    """
+    exon_id = row["Exon ID"]
+    seq_json = ensembl_get(f"/sequence/id/{exon_id}")
+    full_seq = clean_sequence(seq_json["seq"])
+
+    coding_len = int(row.get("CodingLen", 0))
+    if cds_info and cds_info.get("has_cds") and coding_len > 0:
+        start_off = int(row.get("CodingStartOffset", -1))
+        end_off = int(row.get("CodingEndOffset", -1))
+        if 0 <= start_off < len(full_seq) and 0 <= end_off < len(full_seq) and end_off >= start_off:
+            return full_seq[start_off: end_off + 1]
+
+    return full_seq
 
 
 # ============================================================
@@ -594,33 +614,27 @@ if fetch_btn:
             gene_id = gene_candidates[0]["id"]
             status.write(f"✔ Ensembl Gene ID: {gene_id}")
 
-            # 2) Get canonical transcript
+            # 2) Canonical transcript with exons + translation
             gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
             if not gene_info or "Transcript" not in gene_info:
-                status.update(
-                    label="❌ No transcript information found.", state="error"
-                )
+                status.update(label="❌ No transcript information found.", state="error")
                 st.stop()
 
             canonical = gene_info["canonical_transcript"]
             base = canonical.split(".")[0]
             tx_list = [t for t in gene_info["Transcript"] if t["id"].split(".")[0] == base]
             if not tx_list:
-                status.update(
-                    label="❌ Canonical transcript not found.", state="error"
-                )
+                status.update(label="❌ Canonical transcript not found.", state="error")
                 st.stop()
 
             tx = tx_list[0]
             strand = tx.get("strand", gene_info.get("strand", 1))
             exons = tx.get("Exon", [])
             if not exons:
-                status.update(
-                    label="❌ No exon information for transcript.", state="error"
-                )
+                status.update(label="❌ No exon information for transcript.", state="error")
                 st.stop()
 
-            # Build exon dataframe (1-based exon indices, matching Ensembl)
+            # Exon dataframe (1-based index)
             df_exons = pd.DataFrame(
                 [
                     {
@@ -633,7 +647,7 @@ if fetch_btn:
                 ]
             )
 
-            # 3) CDS / translation info
+            # Translation / CDS information
             transl = tx.get("Translation", None)
             cds_info = {
                 "has_cds": False,
@@ -651,7 +665,6 @@ if fetch_btn:
                 cds_end = transl["end"]
                 cds_min = min(cds_start, cds_end)
                 cds_max = max(cds_start, cds_end)
-
                 cds_first_coord = cds_start if strand == 1 else cds_end
 
                 cds_info.update(
@@ -666,49 +679,104 @@ if fetch_btn:
                 )
 
                 is_coding_flags = []
-                coding_indices = []
+                coding_lens = []
+                coding_fracs = []
+                coding_start_offsets = []
+                coding_end_offsets = []
+                coding_exons = []
 
                 for _, row in df_exons.iterrows():
                     start, end = row["Start"], row["End"]
-                    # Overlap with CDS region
+                    exon_len = end - start + 1
+
                     overlap_start = max(start, cds_min)
                     overlap_end = min(end, cds_max)
-                    coding_len = max(0, overlap_end - overlap_start + 1)
-                    exon_len = end - start + 1
-                    is_coding = coding_len > 0
-                    is_coding_flags.append(is_coding)
 
-                    if is_coding and start <= cds_first_coord <= end:
-                        coding_indices.append(int(row["Exon"]))
+                    if overlap_end >= overlap_start:
+                        coding_len = overlap_end - overlap_start + 1
+                        coding_fraction = coding_len / exon_len
+
+                        if strand == 1:
+                            coding_start_offset = overlap_start - start
+                            coding_end_offset = overlap_end - start
+                        else:
+                            coding_start_offset = end - overlap_end
+                            coding_end_offset = end - overlap_start
+
+                        is_coding = True
+                        coding_exons.append(int(row["Exon"]))
+                    else:
+                        coding_len = 0
+                        coding_fraction = 0.0
+                        coding_start_offset = -1
+                        coding_end_offset = -1
+                        is_coding = False
+
+                    is_coding_flags.append(is_coding)
+                    coding_lens.append(coding_len)
+                    coding_fracs.append(coding_fraction)
+                    coding_start_offsets.append(coding_start_offset)
+                    coding_end_offsets.append(coding_end_offset)
 
                 df_exons["IsCoding"] = is_coding_flags
-                first_coding_exon_index = coding_indices[0] if coding_indices else None
+                df_exons["CodingLen"] = coding_lens
+                df_exons["CodingFraction"] = coding_fracs
+                df_exons["CodingStartOffset"] = coding_start_offsets
+                df_exons["CodingEndOffset"] = coding_end_offsets
+
+                if coding_exons:
+                    first_coding_exon_index = min(coding_exons)
+                else:
+                    first_coding_exon_index = None
+
                 cds_info["first_coding_exon_index"] = first_coding_exon_index
             else:
                 df_exons["IsCoding"] = False
+                df_exons["CodingLen"] = 0
+                df_exons["CodingFraction"] = 0.0
+                df_exons["CodingStartOffset"] = -1
+                df_exons["CodingEndOffset"] = -1
+                first_coding_exon_index = None
 
+            # Decide recommended KO exon (Option B logic)
+            recommended_exon_index = None
+            UTR_HEAVY_THRESHOLD = 0.4  # if < 40% coding, treat as UTR-heavy
+
+            if first_coding_exon_index is not None:
+                first_row = df_exons[df_exons["Exon"] == first_coding_exon_index].iloc[0]
+                first_fraction = first_row["CodingFraction"]
+
+                coding_exon_indices_sorted = sorted(
+                    df_exons[df_exons["IsCoding"]]["Exon"].tolist()
+                )
+                if (
+                    first_fraction < UTR_HEAVY_THRESHOLD
+                    and len(coding_exon_indices_sorted) > 1
+                ):
+                    # choose second coding exon as recommended
+                    recommended_exon_index = coding_exon_indices_sorted[1]
+                else:
+                    recommended_exon_index = first_coding_exon_index
+            else:
+                # no coding exons: pick exon 1 by default
+                recommended_exon_index = int(df_exons["Exon"].min())
+
+            # Store in session_state
             st.session_state["exons_df"] = df_exons
             st.session_state["cds_info"] = cds_info
+            st.session_state["first_coding_exon_index"] = first_coding_exon_index
+            st.session_state["recommended_exon_index"] = recommended_exon_index
+            st.session_state["selected_exon_index"] = recommended_exon_index
 
-            # Default exon: first coding exon if available, else exon 1
-            default_exon_index = (
-                cds_info.get("first_coding_exon_index")
-                if cds_info.get("first_coding_exon_index") is not None
-                else int(df_exons["Exon"].min())
-            )
-            st.session_state["selected_exon_index"] = default_exon_index
-
-            # Fetch sequence for default exon
-            chosen_row = df_exons[df_exons["Exon"] == default_exon_index].iloc[0]
-            exon_id = chosen_row["Exon ID"]
-            seq_json = ensembl_get(f"/sequence/id/{exon_id}")
-            seq = clean_sequence(seq_json["seq"])
+            # Fetch sequence for recommended exon (cropped to CDS if present)
+            chosen_row = df_exons[df_exons["Exon"] == recommended_exon_index].iloc[0]
+            seq = fetch_exon_sequence(chosen_row, cds_info)
             st.session_state["exon_seq"] = seq
-            st.session_state["gene_label"] = f"{symbol}_Exon{default_exon_index}"
+            st.session_state["gene_label"] = f"{symbol}_Exon{recommended_exon_index}"
 
             status.update(label="✔ Exon data retrieved", state="complete")
 
-# Display exons, QC, override selector, and exon structure
+# Display exons, QC, override selection, and exon structure
 df_exons = st.session_state.get("exons_df")
 cds_info = st.session_state.get("cds_info")
 
@@ -721,6 +789,9 @@ if df_exons is not None:
 
     st.subheader("Exon Quality Control (QC)")
 
+    first_idx = st.session_state.get("first_coding_exon_index")
+    rec_idx = st.session_state.get("recommended_exon_index")
+
     if not cds_info or not cds_info.get("has_cds"):
         st.warning(
             "No coding sequence (CDS) detected for the canonical transcript. "
@@ -730,17 +801,33 @@ if df_exons is not None:
         cds_min = cds_info["cds_min"]
         cds_max = cds_info["cds_max"]
         strand = cds_info["strand"]
-        first_idx = cds_info.get("first_coding_exon_index")
 
         st.write(f"• Genomic CDS range: **{cds_min} – {cds_max}**")
         st.write(f"• Transcript strand: **{'+' if strand == 1 else '-'}**")
 
         if first_idx is not None:
-            st.success(f"✔ First coding exon (auto-detected): **Exon {first_idx}**")
-        else:
-            st.warning(
-                "Could not confidently determine the first coding exon from translation data."
+            first_frac = float(
+                df_exons[df_exons["Exon"] == first_idx]["CodingFraction"].iloc[0]
             )
+            st.write(
+                f"• First coding exon (literal): **Exon {first_idx}** "
+                f"(coding fraction in exon: {first_frac:.2f})"
+            )
+        else:
+            st.write("• First coding exon: not detected (no coding exons).")
+
+        if rec_idx is not None:
+            if first_idx is not None and rec_idx != first_idx:
+                st.warning(
+                    f"⚠ Exon {first_idx} contains a large 5' UTR region before coding begins.\n"
+                    f"For robust frameshift KO, this app **recommends Exon {rec_idx}** "
+                    "as the primary knockout exon.\n"
+                    "You can override this below if you prefer a different exon."
+                )
+            else:
+                st.success(f"✔ Recommended KO exon: **Exon {rec_idx}**")
+        else:
+            st.warning("No recommended KO exon could be determined.")
 
     # Manual override selector
     exon_indices = list(df_exons["Exon"])
@@ -751,11 +838,14 @@ if df_exons is not None:
     def format_exon_label(exon_idx: int) -> str:
         row = df_exons[df_exons["Exon"] == exon_idx].iloc[0]
         coding_flag = row.get("IsCoding", False)
-        tag = "coding" if coding_flag else "non-coding"
-        return f"Exon {exon_idx} ({tag})"
+        frac = float(row.get("CodingFraction", 0.0))
+        if coding_flag:
+            return f"Exon {exon_idx} (coding, CDS fraction {frac:.2f})"
+        else:
+            return f"Exon {exon_idx} (non-coding)"
 
     selected_exon = st.selectbox(
-        "Select exon to use (override auto-choice if desired):",
+        "Select exon to use for gRNA design (override if desired):",
         options=exon_indices,
         index=exon_indices.index(current_sel),
         format_func=format_exon_label,
@@ -765,9 +855,7 @@ if df_exons is not None:
     if selected_exon != current_sel or not st.session_state.get("exon_seq"):
         st.session_state["selected_exon_index"] = selected_exon
         chosen_row = df_exons[df_exons["Exon"] == selected_exon].iloc[0]
-        exon_id = chosen_row["Exon ID"]
-        seq_json = ensembl_get(f"/sequence/id/{exon_id}")
-        seq = clean_sequence(seq_json["seq"])
+        seq = fetch_exon_sequence(chosen_row, cds_info)
         st.session_state["exon_seq"] = seq
         symbol = st.session_state.get("gene_symbol", "")
         st.session_state["gene_label"] = f"{symbol}_Exon{selected_exon}"
@@ -787,7 +875,7 @@ if df_exons is not None:
         )
 
     # Show selected exon sequence
-    st.subheader("Selected exon sequence")
+    st.subheader("Selected exon sequence (coding region if available)")
     st.code(st.session_state["exon_seq"])
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
@@ -800,7 +888,7 @@ st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 st.header("Step 2 — Run local gRNA scoring")
 
 seq_input = st.text_area(
-    "Exon sequence (A/T/G/C only):",
+    "Exon sequence for guide design (auto-filled from Step 1):",
     value=st.session_state["exon_seq"],
     height=160,
 )
