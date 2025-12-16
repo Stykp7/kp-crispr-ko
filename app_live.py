@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CRISPR gRNA Design Assistant (hg38)
+# CRISPR gRNA Design Assistant
 # Ensembl exon → Local scoring engine → QC dashboard → Oligos → Downloads
 
 import time
@@ -10,12 +10,13 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# Try Altair for QC plots, but don't break app if missing
+# Try Altair for QC plots
 try:
     import altair as alt
     HAS_ALTAIR = True
 except ImportError:
     HAS_ALTAIR = False
+
 
 # ============================================================
 # Basic configuration & styling
@@ -26,11 +27,11 @@ DATA_DIR = APP_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(
-    page_title="CRISPR KO gRNA Design Assistant (hg38)",
+    page_title="CRISPR KO gRNA Design Assistant",
     layout="wide",
 )
 
-# Soft dual-mode theme (CSS only – does not touch Python logic)
+# Soft dual-mode theme (CSS only)
 st.markdown(
     """
     <style>
@@ -88,8 +89,28 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ============================================================
-# Top Banner: Logo (left) + Title (right)
+# Species Selection (NEW FEATURE)
+# ============================================================
+
+SPECIES_CONFIG = {
+    "Human (GRCh38)": {"ensembl_species": "homo_sapiens"},
+    "Mouse (GRCm39)": {"ensembl_species": "mus_musculus"},
+    "Pig (Sscrofa11.1)": {"ensembl_species": "sus_scrofa"},
+    "Cow (ARS-UCD1.3)": {"ensembl_species": "bos_taurus"},
+    "Sheep (Oar_rambouillet_v1.0)": {"ensembl_species": "ovis_aries"},
+}
+
+st.sidebar.header("Genome Settings")
+species_label = st.sidebar.selectbox(
+    "Select species:", list(SPECIES_CONFIG.keys()), index=0
+)
+current_species = SPECIES_CONFIG[species_label]
+
+
+# ============================================================
+# Top Banner: Logo + Title
 # ============================================================
 
 LOGO_URL = "https://raw.githubusercontent.com/Stykp7/kp-crispr-ko/main/assets/Logo.png"
@@ -97,12 +118,13 @@ LOGO_URL = "https://raw.githubusercontent.com/Stykp7/kp-crispr-ko/main/assets/Lo
 col_logo, col_title = st.columns([1, 8])
 
 with col_logo:
-    st.image(LOGO_URL, width=70)  # Adjust width if needed
+    st.image(LOGO_URL, width=70)
 
 with col_title:
-    st.title("CRISPR KO gRNA Design Assistant (hg38)")
+    st.title("CRISPR KO gRNA Design Assistant")
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+
 
 # ============================================================
 # Ensembl REST API
@@ -123,29 +145,31 @@ def ensembl_get(endpoint, retries=4, delay=0.7):
         time.sleep(delay)
     return None
 
+
 # ============================================================
 # Seq helpers
 # ============================================================
 
 def clean_sequence(seq):
-    return "".join([b for b in str(seq).upper() if b in {"A","T","G","C"}])
+    return "".join([b for b in str(seq).upper() if b in {"A", "T", "G", "C"}])
 
 def revcomp(seq):
     return str(seq).upper().translate(str.maketrans("ATGC", "TACG"))[::-1]
 
+
 # ============================================================
-# Local SpCas9 (NGG) guide finder
+# Local SpCas9 NGG guide finder
 # ============================================================
 
 def find_spcas9_ngg_guides(seq):
     seq = clean_sequence(seq)
     guides = []
 
-    # Forward strand
+    # Forward
     for i in range(len(seq) - 23 + 1):
         twenty = seq[i:i+20]
         pam = seq[i+20:i+23]
-        if len(pam) == 3 and pam[1:] == "GG":  # NGG
+        if len(pam) == 3 and pam[1:] == "GG":
             guides.append({
                 "SeqId": twenty + pam,
                 "guideId": f"fw_{i+1}",
@@ -155,7 +179,7 @@ def find_spcas9_ngg_guides(seq):
                 "GuidePos": i + 1
             })
 
-    # Reverse strand
+    # Reverse
     rc = revcomp(seq)
     L = len(seq)
     for i in range(len(rc) - 23 + 1):
@@ -173,11 +197,11 @@ def find_spcas9_ngg_guides(seq):
             })
     return guides
 
+
 def gc_fraction(seq):
     seq = clean_sequence(seq)
-    if not seq:
-        return 0
-    return (seq.count("G") + seq.count("C")) / len(seq)
+    return (seq.count("G") + seq.count("C")) / len(seq) if seq else 0
+
 
 def local_offtargets_within_seq(seq, guide, max_mismatches=3):
     seq = clean_sequence(seq)
@@ -204,40 +228,33 @@ def local_offtargets_within_seq(seq, guide, max_mismatches=3):
 
     return count
 
+
 def mit_like_score(guide):
     g = clean_sequence(guide)
     if len(g) != 20:
         return 0
     gc = gc_fraction(g)
-    score = max(0, 1 - abs(gc - 0.5) / 0.5) * 100
+    score = max(0, 1 - abs(gc - 0.5)/0.5) * 100
     if "TTTT" in g:
         score *= 0.7
     if gc < 0.3 or gc > 0.7:
         score *= 0.8
     return score
 
+
 def efficiency_like_score(g):
     g = clean_sequence(g)
     if len(g) != 20:
         return 0
     score = 50
-    if g[19] == "G":
-        score += 10
-    if g[0] == "A":
-        score -= 5
+    if g[19] == "G": score += 10
+    if g[0] == "A": score -= 5
     gc = gc_fraction(g)
     score += max(0, 1 - abs(gc - 0.5) / 0.5) * 20
     return max(0, min(100, score))
 
+
 def rank_guides_local(seq, guides):
-    """
-    Returns:
-        display_ranked : ranked table with cosmetic columns removed
-        top10          : top 10 guides (display)
-        top2           : top 2 guides (display)
-        df_oligos      : oligo design table
-        ranked_full    : full internal table (for QC + downloads)
-    """
     if not guides:
         return None, None, None, None, None
 
@@ -245,11 +262,13 @@ def rank_guides_local(seq, guides):
 
     df["GC_frac"] = df["targetSeq"].apply(gc_fraction)
     df["GC_bonus"] = df["GC_frac"].apply(
-        lambda gc: 1 if 0.4 <= gc <= 0.6 else max(0, 1 - abs(gc - 0.5) / 0.5)
+        lambda gc: 1 if 0.4 <= gc <= 0.6 else max(0, 1 - abs(gc - 0.5)/0.5)
     )
     df["MIT"] = df["targetSeq"].apply(mit_like_score)
     df["EffScore"] = df["targetSeq"].apply(efficiency_like_score)
-    df["OffTargets"] = df["targetSeq"].apply(lambda g: local_offtargets_within_seq(seq, g))
+    df["OffTargets"] = df["targetSeq"].apply(
+        lambda g: local_offtargets_within_seq(seq, g)
+    )
 
     max_pos = df["GuidePos"].max() or 1
     df["Position_bonus"] = 1 - df["GuidePos"] / max_pos
@@ -266,14 +285,12 @@ def rank_guides_local(seq, guides):
 
     ranked_full = df.sort_values("CombinedScore", ascending=False).reset_index(drop=True)
 
-    # DROP unwanted columns ONLY in displayed tables
     drop_cols = ["GC_frac", "GC_bonus", "MIT_norm", "OffTargets", "Off_norm"]
     display_ranked = ranked_full.drop(columns=[c for c in drop_cols if c in ranked_full])
 
     top10 = display_ranked.head(10).reset_index(drop=True)
     top2 = display_ranked.head(2).reset_index(drop=True)
 
-    # Oligos (based on full ranked table)
     oligos = []
     for _, row in ranked_full.head(2).iterrows():
         guide = row["targetSeq"]
@@ -284,9 +301,11 @@ def rank_guides_local(seq, guides):
             "Forward_5to3": "CACC" + u6,
             "Reverse_3to5": "AAAC" + revcomp(u6)
         })
+
     df_oligos = pd.DataFrame(oligos)
 
     return display_ranked, top10, top2, df_oligos, ranked_full
+
 
 # ============================================================
 # Session defaults
@@ -297,61 +316,70 @@ if "exon_seq" not in st.session_state:
 if "gene_label" not in st.session_state:
     st.session_state["gene_label"] = ""
 
-# QC + download dataframes
-if "ranked_full" not in st.session_state:
-    st.session_state["ranked_full"] = None
-if "ranked_display" not in st.session_state:
-    st.session_state["ranked_display"] = None
-if "top10" not in st.session_state:
-    st.session_state["top10"] = None
-if "top2" not in st.session_state:
-    st.session_state["top2"] = None
-if "oligos" not in st.session_state:
-    st.session_state["oligos"] = None
+for key in ["ranked_full", "ranked_display", "top10", "top2", "oligos"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
 
 # ============================================================
-# STEP 1 — Ensembl exon retrieval
+# STEP 1 — Retrieve exon
 # ============================================================
 
-st.header("Step 1 — Retrieve earliest coding exon from Ensembl (hg38)")
+st.header("Step 1 — Retrieve earliest coding exon from Ensembl")
+st.caption(f"Selected species: **{species_label}**")
 
 col1, col2 = st.columns([3, 1])
 with col1:
     gene_symbol = st.text_input(
-        "Enter human gene symbol:",
+        "Enter gene symbol:",
         value="",
-        placeholder="e.g YAP1",
-        help="Examples: NANOS3, YAP1, SMAD7, SOX17",
+        placeholder="e.g. NANOS3, YAP1, SOX17",
     )
 with col2:
-    fetch_btn = st.button("Retrieve exons from Ensembl")
+    fetch_btn = st.button("Retrieve exons")
 
 if fetch_btn:
+    sp = current_species["ensembl_species"]
+
     if not gene_symbol.strip():
         st.error("Please enter a gene symbol.")
     else:
         symbol = gene_symbol.strip()
+
         with st.status("🔍 Querying Ensembl…", expanded=True) as status:
-            xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}?external_db=HGNC")
+
+            xrefs = ensembl_get(f"/xrefs/symbol/{sp}/{symbol}?external_db=HGNC")
             if not xrefs:
-                xrefs = ensembl_get(f"/xrefs/symbol/homo_sapiens/{symbol}")
+                xrefs = ensembl_get(f"/xrefs/symbol/{sp}/{symbol}")
 
             if not xrefs:
+                status.update(label="❌ Gene not found for this species.", state="error")
+                st.stop()
+
+            gene_candidates = [x for x in xrefs if x.get("type") == "gene"]
+            if not gene_candidates:
                 status.update(label="❌ Gene not found.", state="error")
                 st.stop()
 
-            gene_id = [x for x in xrefs if x.get("type") == "gene"][0]["id"]
+            gene_id = gene_candidates[0]["id"]
             status.write(f"✔ Ensembl Gene ID: {gene_id}")
 
             gene_info = ensembl_get(f"/lookup/id/{gene_id}?expand=1")
+
             canonical = gene_info["canonical_transcript"]
             base = canonical.split(".")[0]
             tx = [t for t in gene_info["Transcript"] if t["id"].split(".")[0] == base][0]
 
             exons = tx["Exon"]
+
             df_exons = pd.DataFrame([
-                {"Exon": i, "Start": e["start"], "End": e["end"],
-                 "Phase": e.get("phase", -1), "Exon ID": e["id"]}
+                {
+                    "Exon": i,
+                    "Start": e["start"],
+                    "End": e["end"],
+                    "Phase": e.get("phase", -1),
+                    "Exon ID": e["id"],
+                }
                 for i, e in enumerate(exons)
             ])
 
@@ -359,13 +387,30 @@ if fetch_btn:
             st.dataframe(df_exons[["Exon", "Start", "End", "Exon ID"]],
                          use_container_width=True)
 
+            # Select first coding exon
             coding = df_exons[df_exons["Phase"] != -1]
-            chosen = coding.iloc[0] if len(coding) > 0 else df_exons.iloc[1]
+            chosen = coding.iloc[0] if len(coding) else df_exons.iloc[1]
+
+            # NEW: Exon QC
+            st.subheader("Exon Quality Control (QC)")
+            if coding.empty:
+                st.warning("No coding exons detected — gene may be non-coding.")
+            else:
+                first_coding = int(coding.iloc[0]["Exon"])
+                st.success(f"✔ First coding exon: Exon {first_coding}")
+
+                if int(chosen["Exon"]) != first_coding:
+                    st.warning(
+                        f"⚠️ Automatically selected Exon {int(chosen['Exon'])}, "
+                        f"but the first coding exon is Exon {first_coding}. "
+                        "For knockouts, targeting the earliest coding exon is generally recommended."
+                    )
 
             exon_id = chosen["Exon ID"]
 
             seq_json = ensembl_get(f"/sequence/id/{exon_id}")
             seq = clean_sequence(seq_json["seq"])
+
             st.session_state["exon_seq"] = seq
             st.session_state["gene_label"] = f"{symbol}_Exon{int(chosen['Exon'])}"
 
@@ -373,6 +418,7 @@ if fetch_btn:
             st.code(seq)
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
+
 
 # ============================================================
 # STEP 2 — Local scoring
@@ -392,6 +438,7 @@ pam_map = {
     "SaCas9 (NNGRRT)": "NNGRRT",
     "Cpf1 (TTTN)": "TTTN",
 }
+
 pam_choice = st.selectbox(
     "Select PAM (local engine supports NGG only):",
     list(pam_map.keys())
@@ -406,7 +453,7 @@ if run_btn:
         st.error("Please paste a valid sequence.")
     else:
         if pam_code != "NGG":
-            st.error("Local engine only supports SpCas9 (NGG).")
+            st.error("Local engine currently supports only SpCas9 (NGG).")
             st.stop()
 
         label = st.session_state["gene_label"]
@@ -422,7 +469,6 @@ if run_btn:
             status.write("Scoring & ranking guides…")
             ranked_display, top10, top2, df_oligos, ranked_full = rank_guides_local(seq, guides)
 
-            # Store for QC plots & downloads
             st.session_state["ranked_full"] = ranked_full
             st.session_state["ranked_display"] = ranked_display
             st.session_state["top10"] = top10
@@ -439,21 +485,19 @@ if run_btn:
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
+
 # ============================================================
 # STEP 3 — QC Analytics Dashboard
 # ============================================================
 
 st.header("Step 3 — QC Analytics Dashboard")
 
-ranked_full = st.session_state.get("ranked_full", None)
+ranked_full = st.session_state.get("ranked_full")
 
 if ranked_full is None:
     st.info("Run Step 2 to generate guides before exploring QC plots.")
 elif not HAS_ALTAIR:
-    st.warning(
-        "Altair is not installed in this environment, "
-        "so interactive QC plots are disabled."
-    )
+    st.warning("Altair is not installed — QC plots disabled.")
 else:
     qc_cols = ["MIT", "EffScore", "Position_bonus", "CombinedScore"]
 
@@ -477,7 +521,6 @@ else:
         (ranked_full["MIT"] <= mit_range[1])
     ].copy()
 
-    # Build Altair scatter plot
     chart = (
         alt.Chart(filtered)
         .mark_circle(size=80)
@@ -508,13 +551,14 @@ else:
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
+
 # ============================================================
 # STEP 4 — Oligos to Order
 # ============================================================
 
 st.header("Step 4 — Oligos to Order")
 
-oligos = st.session_state.get("oligos", None)
+oligos = st.session_state.get("oligos")
 
 if oligos is None or oligos.empty:
     st.info("Run Step 2 to generate gRNAs before viewing oligos.")
@@ -531,8 +575,9 @@ else:
 
 st.markdown("<hr class='uol-divider'>", unsafe_allow_html=True)
 
+
 # ============================================================
-# STEP 5 — Download Centre
+# STEP 5 — Downloads
 # ============================================================
 
 st.header("Step 5 — Export all outputs (CSV)")
@@ -575,6 +620,7 @@ else:
             file_name="oligos_to_order.csv",
             mime="text/csv",
         )
+
 
 # ============================================================
 # Footer
